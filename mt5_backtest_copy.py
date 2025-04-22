@@ -252,9 +252,9 @@ def main():
     timeframe = mt5.TIMEFRAME_H1
     pip_size = 0.0001  # For EURUSD
     start_date = datetime(2024, 1, 1)
-    end_date = datetime(2024, 12, 31)
-    # start_date = datetime(2025, 1, 1)
-    # end_date = datetime(2025, 4, 9)
+    # end_date = datetime(2024, 12, 31)
+    start_date = datetime(2025, 1, 1)
+    end_date = datetime(2025, 4, 9)
     
     print(f"Running backtest from {start_date} to {end_date} on {symbol} {timeframe}")
 
