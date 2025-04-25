@@ -12,21 +12,65 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 trades = []
 
+# def fetch_historical_data(symbol, timeframe, start_date, end_date):
+#     """Fetch historical data for backtesting."""
+#     if not mt5.initialize():
+#         logging.error("Failed to initialize MT5.")
+#         return None
+
+#     rates = mt5.copy_rates_range(symbol, timeframe, start_date, end_date)
+#     mt5.shutdown()
+
+#     if rates is None:
+#         logging.error(f"No data for {symbol} in the given range.")
+#         return None
+
+#     df = pd.DataFrame(rates)
+#     df['time'] = pd.to_datetime(df['time'], unit='s')
+#     return df
+
+
 def fetch_historical_data(symbol, timeframe, start_date, end_date):
     """Fetch historical data for backtesting."""
     if not mt5.initialize():
         logging.error("Failed to initialize MT5.")
         return None
-
-    rates = mt5.copy_rates_range(symbol, timeframe, start_date, end_date)
+    
+    # Break the request into smaller chunks (e.g., monthly)
+    all_data = []
+    current_start = start_date
+    while current_start < end_date:
+        # Calculate chunk end date (one month forward)
+        current_end = datetime(current_start.year + (current_start.month % 12 == 0), 
+                             ((current_start.month % 12) + 1) if current_start.month < 12 else 1,
+                             min(current_start.day, 28))
+        
+        # Don't go beyond end_date
+        if current_end > end_date:
+            current_end = end_date
+            
+        # Fetch chunk
+        rates = mt5.copy_rates_range(symbol, timeframe, current_start, current_end)
+        if rates is not None:
+            all_data.append(rates)
+        
+        # Move to next chunk
+        current_start = current_end
+    
     mt5.shutdown()
-
-    if rates is None:
+    
+    if not all_data:
         logging.error(f"No data for {symbol} in the given range.")
         return None
-
-    df = pd.DataFrame(rates)
+    
+    # Combine all chunks
+    combined_rates = np.concatenate(all_data)
+    df = pd.DataFrame(combined_rates)
     df['time'] = pd.to_datetime(df['time'], unit='s')
+    
+    # Verify data completeness
+    print(f"Data fetched: {df['time'].min()} to {df['time'].max()}, {len(df)} bars")
+    
     return df
 
 def get_swing_highs_lows(df, lookback=5):
@@ -79,6 +123,39 @@ def calculate_position_size(account_balance, risk_percentage, entry_price, stop_
         position_size = risk_amount / risk_in_price
     
     return position_size
+
+# def calculate_position_size(account_balance, risk_percentage, entry_price, stop_loss_price, currency="USD"):
+#     """
+#     Robust position sizing with error handling
+#     """
+#     # Validate inputs
+#     if entry_price <= 0 or account_balance <= 0 or risk_percentage <= 0:
+#         return 0.0
+    
+#     # Calculate risk amount
+#     risk_amount = account_balance * (risk_percentage / 100)
+    
+#     # Handle zero-risk scenarios
+#     if abs(entry_price - stop_loss_price) < 1e-8:  # Floating point tolerance
+#         return 0.0
+    
+#     if currency in ["USD", "EUR", "GBP"]:
+#         pip_size = 0.0001
+#         risk_in_pips = abs(entry_price - stop_loss_price) / pip_size
+        
+#         # Prevent division by zero
+#         if risk_in_pips < 0.1:  # Minimum 0.1 pip risk
+#             return 0.0
+            
+#         pip_value = 10  # Standard lot pip value
+#         position_size = risk_amount / (risk_in_pips * pip_value)
+        
+#         # Apply reasonable bounds
+#         return max(0.01, min(position_size, 50))  # 0.01 to 50 lots
+#     else:
+#         risk_in_price = abs(entry_price - stop_loss_price)
+#         return max(0.01, risk_amount / risk_in_price)
+
 
 def implement_dynamic_risk_management(trades_df, balance_history, max_drawdown_pct=10, 
                                      winning_streak_bonus=0.2, losing_streak_penalty=0.3):
@@ -268,11 +345,13 @@ def backtest_flexible_strategy(df, symbol="EURUSD", initial_balance=10000, pip_s
         if current_hour in high_volatility_hours and current_risk_pct > 0.8:
             current_risk_pct *= 0.7  # Reduce risk during volatile hours
         
-        # NEW: Check if max positions reached
-        if len(active_positions) >= max_open_positions:
-            trading_allowed = False
+        # if len(active_positions) >= max_open_positions:
+        #     trading_allowed = False
             
-        # ENTRY CONDITIONS
+        # max_positions = min(5, int(balance / 1000))  # Scale with account size
+        # if len(active_positions) >= max_positions:
+        #     trading_allowed = False    
+        
         base_conditions = [
             price > ema * 1.001,  # Price above both EMA and VWAP
             (macd - macd_signal) > (0.1 * atr),  # Strong MACD momentum
@@ -285,7 +364,6 @@ def backtest_flexible_strategy(df, symbol="EURUSD", initial_balance=10000, pip_s
 
         high_conviction = adx > 35 and (macd - macd_signal) > (0.25 * atr)
 
-        # NEW: Check for flash crash/pump
         price_change = abs(price / df['close'].iloc[i-1] - 1) if i > 0 else 0
         if price_change > 0.03:  # 3% change in one bar
             trading_allowed = False  # Skip trading during potential flash events
@@ -293,7 +371,9 @@ def backtest_flexible_strategy(df, symbol="EURUSD", initial_balance=10000, pip_s
         # ENTRY LOGIC
         if current_trade is None and sum(base_conditions) >= 2 and trading_allowed:
             risk_multiplier = 1.5 if high_conviction else 1.0
-            sl = max(swing_low, price - 1.1 * atr)
+            # sl = max(swing_low, price - 1.1 * atr)
+            
+            sl = max(swing_low, price - max(0.0001, 1.1 * atr))  # Ensures minimum 0.1 pip distance
             
             # NEW: Calculate position size dynamically
             position_size = calculate_position_size(
@@ -301,15 +381,19 @@ def backtest_flexible_strategy(df, symbol="EURUSD", initial_balance=10000, pip_s
             )
             
             # Cap position size for risk management
-            position_size = min(position_size, 0.05)  # Max 5% of account in one position
+            # position_size = min(position_size, 0.05)
+            # position_size = max(position_size, 0.1)
+            position_size = min(position_size, 0.4)
             
             current_trade = {
                 'entry_time': df['time'].iloc[i],
                 'entry_price': price,
                 'atr': atr,
                 'adx': adx,
-                'take_profit': price + (3.5 * (price - sl)),
-                'initial_sl': sl,
+                # 'take_profit': price + (5 * (price - sl)),
+                'take_profit': price + (2.5* atr), # fixed atr instead of ratio
+                # 'initial_sl': sl,
+                'initial_sl': price - (1.0 * atr),  # Fixed ATR for SL
                 'current_sl': sl,
                 'position_size': position_size * risk_multiplier,
                 'high_conviction': high_conviction,
@@ -353,7 +437,8 @@ def backtest_flexible_strategy(df, symbol="EURUSD", initial_balance=10000, pip_s
                     exit_reason = 'Swing low hit ure a huge bum push that swing low up'
             elif (rsi > 68) and (macd < macd_signal):
                 exit_reason = 'Momentum reversal'
-            elif (adx < 22) and (unrealized_pnl < current_trade['atr']):
+            # elif (adx < 22) and (unrealized_pnl < current_trade['atr']):
+            elif (adx < 18) and (unrealized_pnl < 0):
                 exit_reason = 'Weak trend'
             
             if exit_reason:
@@ -425,7 +510,6 @@ def calculate_metrics(trades_df, total_pnl, balance_history):
     max_balance_dd = min([b - peak_balance for b in balance_history if balance_history.index(b) > balance_history.index(peak_balance)] or [0])
     max_balance_dd_pct = (max_balance_dd / peak_balance) * 100 if peak_balance > 0 else 0
     
-    # Print results
     print(f"\nAccurate Backtest Results:")
     print(f"Total Trades: {total_trades}")
     print(f"Win Rate: {win_rate:.2f}%") 
@@ -435,18 +519,15 @@ def calculate_metrics(trades_df, total_pnl, balance_history):
     print(f"Total PnL: {total_pnl:.2f} pips")
     print(f"Max Drawdown: {max_drawdown:.2f} pips")
     
-    # NEW: Print account growth metrics
     print(f"\nAccount Performance:")
     print(f"Initial Balance: ${initial_balance:.2f}")
     print(f"Final Balance: ${final_balance:.2f}")
     print(f"Growth: {growth_percentage:.2f}%")
     print(f"Max Balance Drawdown: ${abs(max_balance_dd):.2f} ({abs(max_balance_dd_pct):.2f}%)")
     
-    # Additional stats
     print("\nExit Reasons:")
     print(trades_df['exit_reason'].value_counts())
     
-    # NEW: Print position size stats
     print("\nPosition Size Stats:")
     print(f"Avg Position Size: {trades_df['position_size'].mean():.4f} lots")
     print(f"Max Position Size: {trades_df['position_size'].max():.4f} lots")
@@ -456,10 +537,8 @@ def plot_results(df, balance_history=None):
     """Plot price and trade signals with optional account balance."""
     fig, ax1 = plt.subplots(figsize=(14, 8))
     
-    # Plot price
     ax1.plot(df['time'], df['close'], label='Price', alpha=0.5, color='blue')
     
-    # Plot buy/sell signals
     buy_signals = df[df['signal'] == 1]
     sell_signals = df[df['signal'] == -1]
     ax1.scatter(buy_signals['time'], buy_signals['close'], 
@@ -473,7 +552,6 @@ def plot_results(df, balance_history=None):
     ax1.set_title('Strategy Signals')
     ax1.legend(loc='upper left')
     
-    # NEW: Plot account balance if available
     if balance_history:
         ax2 = ax1.twinx()
         time_points = df['time'].iloc[range(0, len(df), max(1, len(df) // len(balance_history)))][:len(balance_history)]
@@ -489,13 +567,14 @@ def main():
     """Main execution function with complete trade tracking."""
     # Initialize MT5 and fetch data
     symbol = "EURUSD"
-    timeframe = mt5.TIMEFRAME_H4
+    timeframe = mt5.TIMEFRAME_H1
     pip_size = 0.0001  # For EURUSD
     # start_date = datetime(2024, 1, 1)
     # end_date = datetime(2024, 12, 31)
-    start_date = datetime(2025, 1, 1)
-    end_date = datetime(2025, 4, 9)
-    initial_balance = 10000  # Starting with $10k
+    start_date = datetime(2025, 3, 1)
+    end_date = datetime(2025, 3, 30)
+    # initial_balance = 10000  # Starting with $10k
+    initial_balance = 50
     
     print(f"Running backtest from {start_date} to {end_date} on {symbol} {timeframe}")
 
@@ -509,13 +588,9 @@ def main():
         df, symbol, initial_balance, pip_size, max_open_positions=3
     )
 
-    # Calculate and display metrics
     calculate_metrics(trades_df, total_pnl, balance_history)
-
-    # Plot results with account balance
     plot_results(df, balance_history)
 
-    # Show best/worst trades
     if not trades_df.empty:
         best_trade = trades_df.loc[trades_df['pnl'].idxmax()]
         worst_trade = trades_df.loc[trades_df['pnl'].idxmin()]
@@ -524,7 +599,6 @@ def main():
         print("\nWorst Trade:")
         print(worst_trade)
 
-    # Save results
     results_dir = "backtest_results"
     os.makedirs(results_dir, exist_ok=True)
     
@@ -539,6 +613,11 @@ def main():
     })
     balance_df.to_csv(f"{results_dir}/balance_history_{timestamp}.csv", index=False)
     
+    
+    print(f"Raw bars fetched: {len(df)}")
+    plt.plot(df['time'], df['close'])
+    plt.title("Data Completeness Check")
+    plt.show()
     print(f"\nResults saved to {results_dir}/")
 
 if __name__ == '__main__':
