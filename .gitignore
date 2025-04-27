@@ -1,6 +1,8 @@
 settings.json
+TradeBot_venv/
 *.pyc
 *.xlsx
 *.csv
 *.json
+__pycache__/
 
